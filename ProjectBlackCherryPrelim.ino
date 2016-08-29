@@ -2,6 +2,7 @@
 
 #include "ESP8266WiFi.h"
 #include "WiFiUDP.h"
+#include "ArduinoJson.h"
 
 #include "ST7565.h"
 
@@ -12,9 +13,12 @@
 
 #define _SSID "BigMcLargeHuge"
 #define _PASS "pastrami"
+#define W_API "90acf72d271b69ce"
+#define W_LOC "Canada/Kanata"
 #define NTP_PACKET_SIZE 48
 #define NTP_SERVER_NAME "ca.pool.ntp.org"
 #define LOCAL_PORT 2390
+#define HTTP_PORT 80
 
 IPAddress timeServerIP;
 
@@ -23,7 +27,17 @@ WiFiUDP udp;
 int count;
 
 time_t dstStart, dstEnd;
+static char respBuf[4096];
 
+// HTTP request
+#define WUNDERGROUND "api.wunderground.com"
+const char WUNDERGROUND_REQ[] =
+    "GET /api/" W_API "/conditions/q/" W_LOC ".json HTTP/1.1\r\n"
+    "User-Agent: ESP8266/0.1\r\n"
+    "Accept: */*\r\n"
+    "Host: " WUNDERGROUND "\r\n"
+    "Connection: close\r\n"
+    "\r\n";
 
 void setup()
 {
@@ -53,6 +67,7 @@ void setup()
   count = 0;
 
   updateTime();
+  updateWeather();
 }
 
 void loop(){
@@ -159,6 +174,88 @@ unsigned long sendNTPpacket(IPAddress& address)
   udp.endPacket();
 }
 
+void updateWeather()
+{
+  // Use WiFiClient class to create TCP connections
+  WiFiClient httpclient;
+  if (!httpclient.connect(WUNDERGROUND, HTTP_PORT)) {
+    Serial.println(F("connection failed"));
+    return;
+  }
+
+  //Sends a request for the weather
+  httpclient.print(WUNDERGROUND_REQ);
+  httpclient.flush();
+
+  int respLen = 0;
+  bool skipHeaders = true;
+  while (httpclient.connected() || httpclient.available()){
+    if (skipHeaders) {
+      String aLine = httpclient.readStringUntil('\n');
+      if (aLine.length() <= 1) {
+        skipHeaders = false;
+      }
+    }
+    else {
+      int bytesIn;
+      bytesIn = httpclient.read((uint8_t *)&respBuf[respLen], sizeof(respBuf) - respLen);
+      if (bytesIn > 0) {
+        respLen += bytesIn;
+        if (respLen > sizeof(respBuf))
+          respLen = sizeof(respBuf);
+      }
+      else if (bytesIn < 0) {
+        Serial.println("Error reading http");
+      }
+    }
+    delay(1);
+  }
+  httpclient.stop();
+
+  if (respLen >= sizeof(respBuf)) {
+    Serial.println("Shit's too big");
+  }
+  respBuf[respLen++] = '\0';
+
+  if (!showWeather(respBuf)) {
+    Serial.println("Oh no error");
+  }
+  
+}
+
+bool showWeather(char *json)
+{
+  StaticJsonBuffer<3*1024> jsonBuffer;
+  // Skip characters until first '{' found
+  // Ignore chunked length, if present
+  char *jsonstart = strchr(json, '{');
+  //Serial.print(F("jsonstart ")); Serial.println(jsonstart);
+  if (jsonstart == NULL) {
+    Serial.println(F("JSON data missing"));
+    return false;
+  }
+  json = jsonstart;
+
+  // Parse JSON
+  JsonObject& root = jsonBuffer.parseObject(json);
+  if (!root.success()) {
+    Serial.println(F("jsonBuffer.parseObject() failed"));
+    return false;
+  }
+
+  // Extract weather info from parsed JSON
+  JsonObject& current = root["current_observation"];
+  const char *place = current["display_location"]["full"];
+  Serial.print(place);
+  const int temp_c = current["temp_c"];
+  const float temp_cf = current["temp_c"];
+  Serial.print(temp_c); Serial.print(F(" C, "));
+  Serial.print(temp_cf, 1); Serial.print(F(" C, "));
+  const char *weather = current["weather"];
+  Serial.println(weather);
+
+  return true;
+}
 
 
 
